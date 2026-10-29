@@ -30,6 +30,7 @@ import {
   formatNotification,
 } from '../src/tools/account.js';
 import { shopVouchersFrom, formatShopVouchers } from '../src/tools/actions.js';
+import { createIdleCloser, idleMsFrom, DEFAULT_IDLE_MS } from '../src/browser/idle.js';
 import {
   accountToolsSetting,
   registerAccountTool,
@@ -1092,6 +1093,62 @@ test('findCartItem: by item, by item+model, and ambiguous multi-variant lines', 
   assert.equal(ambiguous.item, undefined);
   assert.equal(ambiguous.matches.length, 2);
   assert.equal(findCartItem(blocks, '3').matches.length, 0);
+});
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+test('idleMsFrom: default, explicit, zero and invalid values', () => {
+  assert.equal(idleMsFrom(undefined), DEFAULT_IDLE_MS);
+  assert.equal(idleMsFrom(''), DEFAULT_IDLE_MS);
+  assert.equal(idleMsFrom('60000'), 60000);
+  assert.equal(idleMsFrom('0'), 0);
+  assert.equal(idleMsFrom('-5'), DEFAULT_IDLE_MS);
+  assert.equal(idleMsFrom('soon'), DEFAULT_IDLE_MS);
+  assert.equal(idleMsFrom('1e12'), 2 ** 31 - 1);
+});
+
+test('idle closer: closes once the idle period passes after a call', async () => {
+  let closes = 0;
+  const idle = createIdleCloser(
+    20,
+    async () => void closes++,
+    () => true,
+  );
+  await idle.track(async () => {});
+  assert.equal(closes, 0);
+  await sleep(60);
+  assert.equal(closes, 1);
+});
+
+test('idle closer: never closes during a call, and a new call restarts the countdown', async () => {
+  let closes = 0;
+  const idle = createIdleCloser(
+    30,
+    async () => void closes++,
+    () => true,
+  );
+  await idle.track(async () => {});
+  await sleep(15);
+  const slow = idle.track(() => sleep(60));
+  assert.equal(idle.busy(), true);
+  await sleep(45); // past the first countdown, still inside the slow call
+  assert.equal(closes, 0);
+  await slow;
+  assert.equal(idle.busy(), false);
+  await sleep(60);
+  assert.equal(closes, 1);
+});
+
+test('idle closer: 0, disable() and a closed browser all prevent closing', async () => {
+  let closes = 0;
+  const close = async () => void closes++;
+  await createIdleCloser(0, close, () => true).track(async () => {});
+  await createIdleCloser(20, close, () => false).track(async () => {});
+  const disabled = createIdleCloser(20, close, () => true);
+  await disabled.track(async () => {});
+  disabled.disable();
+  await sleep(60);
+  assert.equal(closes, 0);
 });
 
 await runTests();

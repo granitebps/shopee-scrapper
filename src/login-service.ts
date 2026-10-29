@@ -12,7 +12,14 @@
  */
 import 'dotenv/config';
 import { writeFileSync } from 'node:fs';
-import { getContext, isLoggedIn, closeContext, BASE_URL, PROFILE_DIR } from './browser/session.js';
+import {
+  getContext,
+  isLoggedIn,
+  closeContext,
+  keepBrowserOpen,
+  BASE_URL,
+  PROFILE_DIR,
+} from './browser/session.js';
 
 const STATUS_FILE = process.env.SHOPEE_LOGIN_STATUS_FILE || '/tmp/shopee-login-status';
 const POLL_MS = 3000;
@@ -36,7 +43,9 @@ async function main() {
   log(`Profile directory: ${PROFILE_DIR}`);
   writeFileSync(STATUS_FILE, 'starting\n');
 
-  // Force a visible window regardless of SHOPEE_HEADLESS.
+  // Force a visible window regardless of SHOPEE_HEADLESS, and keep it open
+  // however long signing in takes.
+  keepBrowserOpen();
   const ctx = await getContext(false);
   ctx.on('close', () => {
     if (!stopping) {

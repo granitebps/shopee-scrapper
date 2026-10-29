@@ -19,6 +19,7 @@ All optional. Set them in your MCP client's **`env`** block, or copy `.env.examp
 | `SHOPEE_HEADLESS`         | `false`                        | Keep `false` — headless is detected.                                         |
 | `SHOPEE_ACCOUNT_TOOLS`    | `auto`                         | `auto`: account tools while logged in; `off`: read-only.                     |
 | `CACHE_TTL_MS`            | `30000`                        | In-memory cache lifetime.                                                    |
+| `SHOPEE_BROWSER_IDLE_MS`  | `300000`                       | Close the browser after this long without a tool call; `0` keeps it open.    |
 | `DEBUG`                   | `false`                        | Log startup/debug info to stderr.                                            |
 | `MCP_TRANSPORT`           | `stdio`                        | `http`: stateless Streamable HTTP at `/mcp`, `GET /health`.                  |
 | `MCP_HOST`                | `127.0.0.1`                    | HTTP bind address (`0.0.0.0` in the Docker image).                           |

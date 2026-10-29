@@ -52,6 +52,8 @@ services:
       # Read-only discovery: never expose cart/order/like/follow tools.
       SHOPEE_ACCOUNT_TOOLS: 'off'
       CACHE_TTL_MS: ${CACHE_TTL_MS:-30000}
+      # Close the browser after 5 idle minutes (0 keeps it open).
+      SHOPEE_BROWSER_IDLE_MS: ${SHOPEE_BROWSER_IDLE_MS:-300000}
       DEBUG: ${DEBUG:-false}
     # Measured: ~250 MiB idle with the browser up, 650 MiB anon / 810 MiB
     # cgroup peak while loading Shopee pages; 768m ran at the ceiling. Page

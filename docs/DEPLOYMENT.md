@@ -17,7 +17,7 @@ MCP clients (Fami/OpenClaw, …)            your laptop
                 (one browser at a time: flock on /data)
 ```
 
-- **`shopee-mcp`**: stateless Streamable HTTP at `/mcp` and `GET /health`, with no published ports. Containers on the external `ai-routing` network reach it at **`http://shopee-mcp:8000/mcp`**. The browser starts lazily on the first tool call and is reused; navigation stays serialized on one tab.
+- **`shopee-mcp`**: stateless Streamable HTTP at `/mcp` and `GET /health`, with no published ports. Containers on the external `ai-routing` network reach it at **`http://shopee-mcp:8000/mcp`**. The browser starts lazily on the first tool call and is reused; navigation stays serialized on one tab. After 5 minutes without a call it closes again (`SHOPEE_BROWSER_IDLE_MS`), and the next call relaunches it in about a second.
 - **`shopee-login`**: started only to sign in. It opens the persistent profile at Shopee's login page on a virtual display and serves a browser viewer on the host's `127.0.0.1:6080` only. Normally it is stopped and uses no CPU or RAM.
 - **Shared profile.** Both services mount the named volume `shopee-profile` at `/data`, and the profile lives in `/data/shopee-profile`. It survives restarts, rebuilds, container recreation and reboots.
 - **Mutual exclusion.** The login service sits behind the Compose profile `login`, so a plain `docker compose up -d` never starts it. On top of that, both entrypoints take an exclusive `flock` on `/data/.shopee-profile.lock`, and a second container exits with code 75 rather than open the profile while another holds it. The kernel releases the lock when the holder's processes exit, so a crashed container never leaves a stale lock behind.

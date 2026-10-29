@@ -16,6 +16,10 @@ async function main() {
   } else if (TRANSPORT === 'stdio') {
     const { server } = createServer();
     await server.connect(new StdioServerTransport());
+    // A client that just closes the pipe sends no signal, and the open browser
+    // would keep this process alive as an orphan holding the profile.
+    process.stdin.once('end', shutdown);
+    process.stdin.once('close', shutdown);
     if (DEBUG) {
       process.stderr.write('[shopee-mcp] Server started via stdio (browser-backed discovery)\n');
     }
@@ -29,11 +33,13 @@ async function main() {
 }
 
 // Tidy up the browser on shutdown.
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
-    void closeContext().finally(() => process.exit(0));
-  });
+let shuttingDown = false;
+function shutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void closeContext().finally(() => process.exit(0));
 }
+for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, shutdown);
 
 main().catch((err) => {
   process.stderr.write(`[shopee-mcp] Fatal error: ${err}\n`);

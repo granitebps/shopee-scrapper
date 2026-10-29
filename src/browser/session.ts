@@ -3,6 +3,7 @@ import 'dotenv/config';
 import os from 'node:os';
 import path from 'node:path';
 import type { BrowserContext, Page, Response } from 'playwright';
+import { createIdleCloser, idleMsFrom } from './idle.js';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -56,6 +57,9 @@ const HEADLESS = process.env.SHOPEE_HEADLESS === 'true';
 // one coherent identity across launches (the login and the server alike).
 const FINGERPRINT_SEED = process.env.SHOPEE_FINGERPRINT_SEED?.trim();
 
+// Close the browser after this long without a tool call (0 keeps it open).
+const BROWSER_IDLE_MS = idleMsFrom(process.env.SHOPEE_BROWSER_IDLE_MS);
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -78,6 +82,9 @@ function debug(msg: string): void {
 // app fires (see captureJson).
 
 let contextPromise: Promise<BrowserContext> | null = null;
+// Set while a browser is shutting down, so a relaunch waits for it to release
+// the profile instead of colliding with it.
+let closing: Promise<void> | null = null;
 
 async function createContext(headless: boolean): Promise<BrowserContext> {
   debug(
@@ -106,6 +113,7 @@ async function createContext(headless: boolean): Promise<BrowserContext> {
  * `headless` overrides the env default (the login flow forces a visible window).
  */
 export async function getContext(headless: boolean = HEADLESS): Promise<BrowserContext> {
+  if (!contextPromise && closing) await closing;
   if (!contextPromise) {
     const launching = createContext(headless);
     contextPromise = launching;
@@ -142,10 +150,35 @@ async function getPage(): Promise<Page> {
 // calls don't clobber each other's navigation.
 
 let lock: Promise<unknown> = Promise.resolve();
-function withLock<T>(fn: () => Promise<T>): Promise<T> {
+function serialize<T>(fn: () => Promise<T>): Promise<T> {
   const run = lock.then(fn, fn);
   lock = run.catch(() => {});
   return run;
+}
+
+// The idle close takes the same lock, so it can never cut into a navigation.
+const idle = createIdleCloser(
+  BROWSER_IDLE_MS,
+  () =>
+    serialize(async () => {
+      if (idle.busy()) return;
+      debug(`Browser idle for ${BROWSER_IDLE_MS}ms; closing it`);
+      await closeContext();
+    }),
+  browserStarted,
+);
+
+/** Tool-facing lock: serialized, and counted as activity for the idle close. */
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  return idle.track(() => serialize(fn));
+}
+
+/**
+ * Keep the browser open until closeContext, whatever SHOPEE_BROWSER_IDLE_MS
+ * says. The login flows call this so the window can't close mid-sign-in.
+ */
+export function keepBrowserOpen(): void {
+  idle.disable();
 }
 
 export interface CaptureOptions {
@@ -403,17 +436,30 @@ export async function warm(): Promise<void> {
 
 /** Best-effort check that the saved profile is logged in. */
 export async function isLoggedIn(): Promise<boolean> {
-  const ctx = await getContext();
-  const cookies = await ctx.cookies(BASE_URL);
-  // Shopee sets SPC_U (user id) and SPC_EC (encrypted session) once authenticated.
-  return cookies.some((c) => (c.name === 'SPC_U' || c.name === 'SPC_EC') && c.value.length > 4);
+  // Not under the navigation lock (reading cookies doesn't navigate), but still
+  // activity: check_login_status alone can launch the browser.
+  return idle.track(async () => {
+    const ctx = await getContext();
+    const cookies = await ctx.cookies(BASE_URL);
+    // Shopee sets SPC_U (user id) and SPC_EC (encrypted session) once authenticated.
+    return cookies.some((c) => (c.name === 'SPC_U' || c.name === 'SPC_EC') && c.value.length > 4);
+  });
 }
 
-/** Cleanly close the browser (used on shutdown / after login). */
+/** Cleanly close the browser (used on shutdown, after login and when idle). */
 export async function closeContext(): Promise<void> {
-  if (contextPromise) {
-    const ctx = await contextPromise;
-    await ctx.close();
-    contextPromise = null;
-  }
+  idle.cancel();
+  const pending = contextPromise;
+  if (!pending) return closing ?? undefined;
+  // Detach first so a concurrent getContext waits on `closing` rather than
+  // being handed the browser that is going away.
+  contextPromise = null;
+  const done = pending
+    .then((ctx) => ctx.close())
+    .catch(() => {})
+    .finally(() => {
+      if (closing === done) closing = null;
+    });
+  closing = done;
+  await done;
 }

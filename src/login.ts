@@ -10,7 +10,14 @@
  */
 import 'dotenv/config';
 import readline from 'node:readline';
-import { getContext, isLoggedIn, closeContext, BASE_URL, PROFILE_DIR } from './browser/session.js';
+import {
+  getContext,
+  isLoggedIn,
+  closeContext,
+  keepBrowserOpen,
+  BASE_URL,
+  PROFILE_DIR,
+} from './browser/session.js';
 
 function prompt(question: string): Promise<void> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -27,7 +34,9 @@ async function main() {
   console.log(`Profile directory: ${PROFILE_DIR}`);
   console.log('Opening a Chromium window…\n');
 
-  // Force a visible window regardless of SHOPEE_HEADLESS.
+  // Force a visible window regardless of SHOPEE_HEADLESS, and keep it open
+  // however long signing in takes.
+  keepBrowserOpen();
   const ctx = await getContext(false);
   const page = ctx.pages().find((p) => !p.isClosed()) ?? (await ctx.newPage());
 
