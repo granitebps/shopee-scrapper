@@ -1,0 +1,11 @@
+{
+  "name": "shopee-login-viewer",
+  "private": true,
+  "description": "Browser viewer for the temporary shopee-login container: noVNC + a WebSocket-to-VNC bridge. Installed only in the login image.",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "ws": "8.22.0"
+  }
+}

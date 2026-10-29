@@ -51,6 +51,11 @@ export const PROFILE_DIR =
 // Set SHOPEE_HEADLESS=true only to experiment.
 const HEADLESS = process.env.SHOPEE_HEADLESS === 'true';
 
+// CloakBrowser picks a random fingerprint seed per launch unless one is given,
+// so every restart would look like a new device to Shopee. A fixed seed keeps
+// one coherent identity across launches (the login and the server alike).
+const FINGERPRINT_SEED = process.env.SHOPEE_FINGERPRINT_SEED?.trim();
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
@@ -87,7 +92,11 @@ async function createContext(headless: boolean): Promise<BrowserContext> {
     timezone: TIMEZONE,
     viewport: { width: 1366, height: 768 },
     humanize: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      ...(FINGERPRINT_SEED ? [`--fingerprint=${FINGERPRINT_SEED}`] : []),
+    ],
   })) as unknown as BrowserContext;
   return ctx;
 }
@@ -97,8 +106,27 @@ async function createContext(headless: boolean): Promise<BrowserContext> {
  * `headless` overrides the env default (the login flow forces a visible window).
  */
 export async function getContext(headless: boolean = HEADLESS): Promise<BrowserContext> {
-  if (!contextPromise) contextPromise = createContext(headless);
+  if (!contextPromise) {
+    const launching = createContext(headless);
+    contextPromise = launching;
+    // A long-running server must survive a browser crash or failed launch: drop
+    // the dead context so the next call relaunches instead of failing forever.
+    launching.then(
+      (ctx) =>
+        ctx.on('close', () => {
+          if (contextPromise === launching) contextPromise = null;
+        }),
+      () => {
+        if (contextPromise === launching) contextPromise = null;
+      },
+    );
+  }
   return contextPromise;
+}
+
+/** Whether a browser is launched (or launching) — reported by the HTTP /health. */
+export function browserStarted(): boolean {
+  return contextPromise !== null;
 }
 
 /** The single reused page. */

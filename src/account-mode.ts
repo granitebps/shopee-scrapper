@@ -21,13 +21,31 @@ export function accountToolsSetting(
   return v === 'off' || v === 'false' || v === '0' ? 'off' : 'auto';
 }
 
-const accountTools: RegisteredTool[] = [];
-let active = false;
-let notify: (() => void) | undefined;
+// One group per server instance: stdio has one for the process lifetime, while
+// the stateless HTTP transport builds a server per request (see src/http.ts).
+interface ServerGroup {
+  tools: RegisteredTool[];
+  notify?: () => void;
+}
 
-/** Bind the server so a mode change can notify clients (once, not per tool). */
-export function initAccountMode(server: McpServer): void {
-  notify = () => server.sendToolListChanged();
+const groups = new Set<ServerGroup>();
+// Tools registered before any initAccountMode call (tests) land here.
+let current: ServerGroup = { tools: [] };
+groups.add(current);
+let active = false;
+
+/**
+ * Bind the server so a mode change can notify clients (once, not per tool).
+ * Account tools registered after this belong to it. Returns a release function
+ * that stops tracking them once the server is closed.
+ */
+export function initAccountMode(server: McpServer): () => void {
+  const group: ServerGroup = { tools: [], notify: () => server.sendToolListChanged() };
+  groups.add(group);
+  current = group;
+  return () => {
+    groups.delete(group);
+  };
 }
 
 /** Track an account tool. It starts hidden until a login is confirmed. */
@@ -35,7 +53,7 @@ export function registerAccountTool(tool: RegisteredTool): void {
   // Set the flag directly rather than via disable(): that would send one
   // list_changed notification per tool.
   tool.enabled = active;
-  accountTools.push(tool);
+  current.tools.push(tool);
 }
 
 /** Whether account tools are currently offered. */
@@ -51,8 +69,14 @@ export function setLoggedIn(loggedIn: boolean): void {
   const next = loggedIn && accountToolsSetting() === 'auto';
   if (next === active) return;
   active = next;
-  for (const t of accountTools) t.enabled = next;
-  notify?.();
+  for (const g of groups) {
+    for (const t of g.tools) t.enabled = next;
+    try {
+      g.notify?.();
+    } catch {
+      // A server mid-shutdown can't be notified; its tools are already updated.
+    }
+  }
 }
 
 /** Check the session and update account mode. Never throws. */

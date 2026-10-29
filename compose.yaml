@@ -1,0 +1,88 @@
+# Shopee MCP — homeserver deployment.
+#
+#   docker compose up -d                      MCP service only (normal state)
+#   scripts/shopee-login (from your laptop)   stop MCP → login → restart MCP
+#
+# shopee-mcp and shopee-login share one profile volume but never run together:
+# the login service sits behind the `login` profile (plain `up` ignores it) and
+# both entrypoints take an exclusive flock on the volume, so a second browser
+# refuses to start instead of opening the profile concurrently.
+#
+# Resource limits come from measurements on linux/arm64 (docs/DEPLOYMENT.md).
+
+x-browser: &browser
+  init: true
+  read_only: true
+  # Chromium + Xvfb write only to /tmp (tmpfs, also HOME) and the profile volume.
+  # Playwright launches Chromium with --disable-dev-shm-usage, so its shared
+  # memory lands in /tmp (measured peak ~61 MB) and /dev/shm stays empty —
+  # hence 128m for /tmp and Docker's default 64m shm.
+  tmpfs:
+    - /tmp:size=128m,mode=1777
+  shm_size: 64m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+  stop_grace_period: 30s
+  volumes:
+    - shopee-profile:/data
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: '3'
+
+services:
+  shopee-mcp:
+    <<: *browser
+    build:
+      context: .
+      target: mcp-runtime
+    image: shopee-mcp:local
+    container_name: shopee-mcp
+    restart: unless-stopped
+    # No published ports: only containers on ai-routing reach
+    # http://shopee-mcp:8000/mcp.
+    networks:
+      - ai-routing
+    environment:
+      SHOPEE_DOMAIN: ${SHOPEE_DOMAIN:-shopee.co.id}
+      # Read-only discovery: never expose cart/order/like/follow tools.
+      SHOPEE_ACCOUNT_TOOLS: 'off'
+      CACHE_TTL_MS: ${CACHE_TTL_MS:-30000}
+      DEBUG: ${DEBUG:-false}
+    # Measured: ~250 MiB idle with the browser up, 650 MiB anon / 810 MiB
+    # cgroup peak while loading Shopee pages; 768m ran at the ceiling. Page
+    # loads are CPU-bound (2 CPUs: ~6s, 1 CPU: ~20s) and idle CPU is ~1%.
+    mem_limit: ${SHOPEE_MCP_MEM_LIMIT:-1g}
+    cpus: ${SHOPEE_MCP_CPUS:-2.0}
+
+  shopee-login:
+    <<: *browser
+    build:
+      context: .
+      target: login-runtime
+    image: shopee-login:local
+    container_name: shopee-login
+    profiles: ['login']
+    restart: 'no'
+    ports:
+      # Host loopback only. Reach it through an SSH tunnel, never the LAN.
+      - '127.0.0.1:${SHOPEE_LOGIN_PORT:-6080}:6080'
+    environment:
+      SHOPEE_DOMAIN: ${SHOPEE_DOMAIN:-shopee.co.id}
+      SHOPEE_ACCOUNT_TOOLS: 'off'
+      LOGIN_VNC_PASSWORD: ${LOGIN_VNC_PASSWORD:-}
+    mem_limit: 1g
+    cpus: 2.0
+
+volumes:
+  shopee-profile:
+    name: shopee-profile
+
+networks:
+  ai-routing:
+    external: true
+    name: ai-routing

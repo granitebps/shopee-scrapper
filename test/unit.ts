@@ -36,8 +36,9 @@ import {
   setLoggedIn,
   accountModeActive,
   refreshAccountMode,
+  initAccountMode,
 } from '../src/account-mode.js';
-import type { RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { buildVariantRows } from '../src/tools/variants.js';
 import { shopeeCapture, requireLogin, ShopeeAuthRequiredError } from '../src/api/client.js';
 import { cache } from '../src/utils/cache.js';
@@ -865,6 +866,34 @@ test('account mode: tools start hidden, show on login, hide on logout', async ()
     throw new Error('browser died');
   });
   assert.equal(tool.enabled, false, 'a failed check falls back to read-only');
+});
+
+test('account mode: every server is toggled and notified until released', () => {
+  setLoggedIn(false);
+  const notified: string[] = [];
+  const fakeServer = (name: string) =>
+    ({ sendToolListChanged: () => notified.push(name) }) as unknown as McpServer;
+  const releaseA = initAccountMode(fakeServer('a'));
+  const toolA = { enabled: true } as RegisteredTool;
+  registerAccountTool(toolA);
+  const releaseB = initAccountMode(fakeServer('b'));
+  const toolB = { enabled: true } as RegisteredTool;
+  registerAccountTool(toolB);
+  assert.equal(toolA.enabled, false);
+  assert.equal(toolB.enabled, false);
+
+  setLoggedIn(true);
+  assert.deepEqual([toolA.enabled, toolB.enabled], [true, true]);
+  assert.deepEqual(notified.sort(), ['a', 'b']);
+
+  // A released server (e.g. a finished HTTP request) is no longer tracked.
+  releaseA();
+  notified.length = 0;
+  setLoggedIn(false);
+  assert.equal(toolA.enabled, true, 'released tools are left alone');
+  assert.equal(toolB.enabled, false);
+  assert.deepEqual(notified, ['b']);
+  releaseB();
 });
 
 // ─── account reads ───────────────────────────────────────────────────────────

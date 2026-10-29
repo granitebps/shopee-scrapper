@@ -1,0 +1,8 @@
+# Allow-list: the build only needs these (see Dockerfile COPY lines).
+*
+!package.json
+!package-lock.json
+!tsconfig.json
+!LICENSE
+!src/
+!docker/

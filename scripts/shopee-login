@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# Re-authenticate the homeserver's Shopee session from your laptop.
+#
+#   scripts/shopee-login
+#
+# Stops shopee-mcp, starts the temporary shopee-login container, tunnels its
+# viewer to this machine over SSH, waits while you sign in, then stops the
+# login container and brings shopee-mcp back. The browser runs on the
+# homeserver and writes straight into its persistent profile.
+#
+# Configuration (environment, or KEY=value lines in $SHOPEE_LOGIN_CONFIG,
+# default ~/.config/shopee-mcp/login.env):
+#
+#   SHOPEE_SSH_HOST     required  SSH destination: user@host or a ~/.ssh/config alias
+#   SHOPEE_SSH_OPTS               extra ssh options, e.g. "-p 2222 -i ~/.ssh/homeserver"
+#   SHOPEE_REMOTE_DIR             directory holding compose.yaml on the homeserver,
+#                                 absolute or relative to the remote home (default: shopee-mcp)
+#   SHOPEE_COMPOSE                compose command on the homeserver (default: docker compose)
+#   SHOPEE_LOGIN_PORT             homeserver loopback port of the viewer (default: 6080,
+#                                 must match SHOPEE_LOGIN_PORT used by compose)
+#   SHOPEE_LOCAL_PORT             local port for the tunnel (default: 16080)
+#   SHOPEE_LOGIN_REMOTE_ADDR      address the homeserver forwards to (default: 127.0.0.1)
+set -euo pipefail
+
+CONFIG="${SHOPEE_LOGIN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/shopee-mcp/login.env}"
+if [[ -f "$CONFIG" ]]; then
+  # shellcheck disable=SC1090
+  set -a && source "$CONFIG" && set +a
+fi
+
+HOST="${SHOPEE_SSH_HOST:-}"
+REMOTE_DIR="${SHOPEE_REMOTE_DIR:-shopee-mcp}"
+COMPOSE="${SHOPEE_COMPOSE:-docker compose}"
+REMOTE_PORT="${SHOPEE_LOGIN_PORT:-6080}"
+LOCAL_PORT="${SHOPEE_LOCAL_PORT:-16080}"
+REMOTE_ADDR="${SHOPEE_LOGIN_REMOTE_ADDR:-127.0.0.1}"
+# Used as ${SSH_OPTS[@]+"${SSH_OPTS[@]}"}: an empty array would trip `set -u`
+# on macOS's bash 3.2.
+read -r -a SSH_OPTS <<<"${SHOPEE_SSH_OPTS:-}"
+
+# ─── Output ────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then OK=$'\e[32m✓\e[0m' NO=$'\e[31m✗\e[0m'; else OK='✓' NO='✗'; fi
+step() { printf '%s... ' "$1"; }
+ok() { printf '%s\n' "${1:-$OK}"; }
+fail() {
+  printf '%s\n\n%s\n' "$NO" "$1" >&2
+  exit 1
+}
+
+if [[ -z "$HOST" ]]; then
+  echo "SHOPEE_SSH_HOST is not set (e.g. SHOPEE_SSH_HOST=me@homeserver)." >&2
+  echo "Set it in the environment or in $CONFIG." >&2
+  exit 2
+fi
+
+# ─── SSH: one multiplexed connection carries every command and the tunnel ────
+CTL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/shopee-login.XXXXXX")"
+CTL="$CTL_DIR/ssh.sock"
+FORWARD="127.0.0.1:${LOCAL_PORT}:${REMOTE_ADDR}:${REMOTE_PORT}"
+
+ssh_cmd() { ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -S "$CTL" -o BatchMode=yes "$HOST" "$@"; }
+# Run a command in the remote compose directory. $REMOTE_DIR stays unquoted on
+# the far side only for a leading ~; everything else is escaped.
+remote() { ssh_cmd "cd $(printf '%q' "$REMOTE_DIR" | sed 's/^\\~/~/') && $*"; }
+# true / false, or empty when the homeserver could not be asked.
+container_state() { remote "docker inspect -f '{{.State.Running}}' $1 2>/dev/null || echo false" 2>/dev/null || true; }
+container_running() { [[ "$(container_state "$1")" != false ]]; }
+login_status() { remote "docker exec shopee-login cat /tmp/shopee-login-status 2>/dev/null || echo unavailable"; }
+
+# ─── State, for a safe cleanup on any exit (Ctrl-C included) ─────────────────
+MCP_STOPPED=0 LOGIN_STARTED=0 TUNNEL_UP=0 SUCCESS=0
+
+cleanup() {
+  local code=$?
+  trap - EXIT INT TERM
+  if [[ $SUCCESS -eq 0 ]]; then
+    echo
+    echo "Cleaning up after an interrupted or failed login..."
+  fi
+  if [[ $TUNNEL_UP -eq 1 ]]; then
+    ssh_cmd -O cancel -L "$FORWARD" 2>/dev/null || true
+  fi
+  if [[ $LOGIN_STARTED -eq 1 && $SUCCESS -eq 0 ]]; then
+    remote "$COMPOSE --profile login stop -t 30 shopee-login" >/dev/null 2>&1 || true
+  fi
+  if [[ $MCP_STOPPED -eq 1 && $SUCCESS -eq 0 ]]; then
+    # Never start the server while the login browser may still hold the profile.
+    if container_running shopee-login; then
+      echo "$NO shopee-login may still be running, so shopee-mcp was NOT restarted (the" >&2
+      echo "  profile must never be opened by two browsers). On the homeserver run:" >&2
+      echo "    cd $REMOTE_DIR && $COMPOSE --profile login stop shopee-login && $COMPOSE up -d shopee-mcp" >&2
+    elif remote "$COMPOSE up -d --no-build shopee-mcp" >/dev/null 2>&1; then
+      echo "shopee-mcp restarted with the existing session. Re-run this script to log in."
+    else
+      echo "$NO Could not restart shopee-mcp. On the homeserver run:" >&2
+      echo "    cd $REMOTE_DIR && $COMPOSE up -d shopee-mcp" >&2
+    fi
+  fi
+  ssh_cmd -O exit 2>/dev/null || true
+  # Only the control socket lives here; leave nothing behind in $TMPDIR.
+  rmdir "$CTL_DIR" 2>/dev/null || true
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# ─── Flow ──────────────────────────────────────────────────────────────────────
+echo
+echo "Shopee MCP login"
+echo "----------------"
+
+step "Checking homeserver"
+ssh ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} -o BatchMode=yes -o ConnectTimeout=10 -o ExitOnForwardFailure=yes \
+  -M -S "$CTL" -fN "$HOST" 2>/dev/null || fail "Could not connect to $HOST over SSH (key-based auth is required)."
+remote "test -f compose.yaml" || fail "No compose.yaml in $REMOTE_DIR on $HOST (set SHOPEE_REMOTE_DIR)."
+remote "$COMPOSE version >/dev/null && docker image inspect shopee-login:local >/dev/null" 2>/dev/null ||
+  fail "Docker Compose or the shopee-login image is missing on $HOST. There, run:
+    cd $REMOTE_DIR && $COMPOSE --profile login build"
+ok
+
+step "Stopping Shopee MCP"
+MCP_STOPPED=1
+remote "$COMPOSE stop -t 30 shopee-mcp" >/dev/null 2>&1 || fail "Could not stop shopee-mcp."
+container_running shopee-mcp && fail "shopee-mcp is still running."
+ok
+
+step "Starting temporary login environment"
+VNC_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8 || true)"
+LOGIN_STARTED=1
+# The one-time VNC password travels over stdin, never on a command line.
+printf '%s\n' "$VNC_PASSWORD" | remote "read -r LOGIN_VNC_PASSWORD && export LOGIN_VNC_PASSWORD &&
+  $COMPOSE --profile login up -d --no-build --force-recreate shopee-login" >/dev/null 2>&1 ||
+  fail "Could not start shopee-login. Check: $COMPOSE --profile login logs shopee-login"
+for _ in $(seq 1 60); do
+  status="$(login_status)"
+  [[ "$status" == logged_in || "$status" == logged_out ]] && break
+  [[ "$status" == error ]] && fail "The login browser failed to start. Check: $COMPOSE --profile login logs shopee-login"
+  container_running shopee-login || fail "shopee-login exited. Check: $COMPOSE --profile login logs shopee-login"
+  sleep 2
+done
+[[ "$status" == logged_in || "$status" == logged_out ]] || fail "The login browser did not become ready in time."
+ok
+
+step "Opening secure tunnel"
+ssh_cmd -O forward -L "$FORWARD" 2>/dev/null || fail "Could not forward local port $LOCAL_PORT (already in use? set SHOPEE_LOCAL_PORT)."
+TUNNEL_UP=1
+curl -fsS -o /dev/null --max-time 10 "http://127.0.0.1:${LOCAL_PORT}/" || fail "The login viewer is not reachable through the tunnel."
+ok
+
+URL="http://127.0.0.1:${LOCAL_PORT}/#password=${VNC_PASSWORD}"
+echo
+echo "Opening Shopee login in browser..."
+if command -v open >/dev/null 2>&1; then
+  open "$URL" 2>/dev/null || true
+elif command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$URL" >/dev/null 2>&1 || true
+fi
+echo "If it did not open, visit: $URL"
+echo
+[[ "$status" == logged_in ]] && echo "(This profile already has a Shopee session; you can just press Enter.)"
+echo "Complete Shopee authentication."
+
+while :; do
+  echo
+  read -r -p "Press Enter when finished... " _
+  step "Checking session"
+  status="$(login_status)"
+  if [[ "$status" == logged_in ]]; then
+    ok
+    break
+  fi
+  printf '%s\n' "$NO"
+  echo "No Shopee session detected yet (status: $status)."
+  read -r -p "Press Enter to check again, or type 'abort' to stop without saving a new login: " answer
+  [[ "$answer" == abort ]] && exit 1
+done
+
+step "Stopping login environment"
+ssh_cmd -O cancel -L "$FORWARD" 2>/dev/null || true
+TUNNEL_UP=0
+# A graceful stop closes the browser, which flushes the profile to disk.
+remote "$COMPOSE --profile login stop -t 30 shopee-login" >/dev/null 2>&1 || fail "Could not stop shopee-login."
+container_running shopee-login && fail "shopee-login is still running."
+LOGIN_STARTED=0
+ok
+
+step "Starting Shopee MCP"
+remote "$COMPOSE up -d --no-build shopee-mcp" >/dev/null 2>&1 || fail "Could not start shopee-mcp."
+MCP_STOPPED=0
+ok
+
+step "Checking MCP health"
+health=""
+for _ in $(seq 1 45); do
+  health="$(remote "docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' shopee-mcp" 2>/dev/null || true)"
+  [[ "$health" == healthy ]] && break
+  sleep 2
+done
+[[ "$health" == healthy ]] || fail "shopee-mcp did not become healthy (status: ${health:-unknown}). Check: $COMPOSE logs shopee-mcp"
+ok
+
+# Ask the server itself, over MCP, whether the restored profile is logged in.
+step "Checking login through MCP"
+mcp_check="$(remote "docker exec shopee-mcp node -e \"
+fetch('http://127.0.0.1:' + (process.env.PORT || 8000) + '/mcp', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'check_login_status', arguments: {} } }),
+}).then((r) => r.text()).then((t) => console.log(t.includes('Logged in to') ? 'logged_in' : 'logged_out'), () => console.log('error'));
+\"" 2>/dev/null || echo error)"
+[[ "$mcp_check" == logged_in ]] || fail "shopee-mcp is running but reports no Shopee session ($mcp_check). Re-run this script."
+ok
+
+SUCCESS=1
+echo
+echo "Shopee MCP is ready."

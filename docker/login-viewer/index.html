@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Shopee login</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #1e1e1e;
+      }
+      #screen {
+        position: absolute;
+        inset: 28px 0 0 0;
+      }
+      #status {
+        height: 28px;
+        line-height: 28px;
+        padding: 0 10px;
+        font:
+          13px system-ui,
+          sans-serif;
+        color: #eee;
+        background: #333;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status">Connecting…</div>
+    <div id="screen"></div>
+    <script type="module">
+      import RFB from './novnc/core/rfb.js';
+
+      // The one-time VNC password arrives in the URL fragment (never sent to
+      // the server); drop it from the address bar once read.
+      const params = new URLSearchParams(location.hash.slice(1));
+      const password = params.get('password') ?? '';
+      history.replaceState(null, '', location.pathname);
+
+      const status = document.getElementById('status');
+      const show = (text) => (status.textContent = text);
+      const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/websockify`;
+
+      const rfb = new RFB(document.getElementById('screen'), url, { credentials: { password } });
+      rfb.scaleViewport = true;
+      rfb.addEventListener('connect', () =>
+        show('Connected — sign in to Shopee, then return to the terminal and press Enter.'),
+      );
+      rfb.addEventListener('disconnect', (e) =>
+        show(e.detail.clean ? 'Disconnected.' : 'Connection lost — reload to retry.'),
+      );
+      rfb.addEventListener('credentialsrequired', () =>
+        rfb.sendCredentials({ password: prompt('VNC password') ?? '' }),
+      );
+    </script>
+  </body>
+</html>

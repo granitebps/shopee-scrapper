@@ -147,8 +147,20 @@ All optional — see `.env.example`. Copy to `.env` to override.
 | `SHOPEE_ACCOUNT_TOOLS` | `auto`                         | `auto`: account tools while logged in. `off`: always read-only. |
 | `CACHE_TTL_MS`         | `30000`                        | In-memory cache lifetime.                                       |
 | `DEBUG`                | `false`                        | Log startup/debug info to stderr.                               |
+| `MCP_TRANSPORT`        | `stdio`                        | `http` serves Streamable HTTP at `/mcp` (plus `GET /health`).   |
 
 Tool timings and client timeouts: see [docs/CONFIGURATION.md](./docs/CONFIGURATION.md#tools-and-request-timeouts).
+
+## Self-hosted Docker service
+
+For running continuously on a Linux server (arm64 or amd64), this fork ships a two-container Compose deployment. `shopee-mcp` serves Streamable HTTP at `http://shopee-mcp:8000/mcp` on the external `ai-routing` network, read-only (`SHOPEE_ACCOUNT_TOOLS=off`). `shopee-login` is a temporary browser you drive over an SSH tunnel to sign in. Both use one persistent profile volume and never run at the same time.
+
+```bash
+docker compose up -d     # on the server
+scripts/shopee-login     # from your laptop, to sign in or renew the session
+```
+
+Setup, configuration, shutdown and recovery: **[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md)**.
 
 ## Development
 
