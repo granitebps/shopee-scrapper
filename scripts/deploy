@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Update the homeserver deployment: pull, build, restart, verify, clean up.
+#
+#   scripts/deploy              on the homeserver, from any directory
+#   scripts/deploy --no-pull    deploy the checkout as it is
+#
+# From a laptop: ssh homeserver shopee-mcp/scripts/deploy
+#
+# Pulls the current branch (fast-forward only), rebuilds both images, lets
+# Compose recreate shopee-mcp if its image changed, waits until it is healthy
+# and asks it over MCP whether the Shopee session is still valid. Finally it
+# removes the images this build replaced, and only those: never other
+# projects' images, never the profile volume.
+#
+# Configuration (environment):
+#
+#   SHOPEE_COMPOSE    compose command (default: docker compose)
+set -euo pipefail
+
+COMPOSE="${SHOPEE_COMPOSE:-docker compose}"
+IMAGES=(shopee-mcp:local shopee-login:local)
+
+PULL=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-pull) PULL=0 ;;
+    -h | --help)
+      sed -n '2,17s/^# \{0,1\}//p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $arg (see --help)" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# ─── Output ────────────────────────────────────────────────────────────────────
+if [[ -t 1 ]]; then OK=$'\e[32m✓\e[0m' NO=$'\e[31m✗\e[0m' WARN=$'\e[33m!\e[0m'; else OK='✓' NO='✗' WARN='!'; fi
+step() { printf '%s... ' "$1"; }
+ok() { printf '%s\n' "${1:-$OK}"; }
+fail() {
+  printf '%s\n\n%s\n' "$NO" "$1" >&2
+  exit 1
+}
+
+image_id() { docker image inspect -f '{{.Id}}' "$1" 2>/dev/null || true; }
+container_running() { [[ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" == true ]]; }
+
+# Everything runs inside main, so bash has read the whole script before
+# `git pull` can replace this file.
+main() {
+  cd "$(dirname "$0")/.."
+
+  echo
+  echo "Shopee MCP deploy"
+  echo "-----------------"
+
+  step "Checking environment"
+  [[ -f compose.yaml ]] || fail "No compose.yaml in $PWD."
+  docker info >/dev/null 2>&1 ||
+    fail "Cannot reach Docker. Is this user in the docker group? (sudo usermod -aG docker \$USER, then log in again)"
+  $COMPOSE version >/dev/null 2>&1 || fail "Docker Compose is not available ($COMPOSE)."
+  if container_running shopee-login; then
+    fail "shopee-login is running: a login is in progress. Finish it (or run
+    $COMPOSE --profile login stop shopee-login) and deploy again."
+  fi
+  ok
+
+  if [[ $PULL -eq 1 ]]; then
+    step "Pulling latest code"
+    [[ -z "$(git status --porcelain --untracked-files=no)" ]] ||
+      fail "The checkout has local changes. Commit or discard them, or deploy with --no-pull."
+    local before after
+    before="$(git rev-parse HEAD)"
+    git pull --ff-only --quiet || fail "git pull failed (diverged from the remote?)."
+    after="$(git rev-parse HEAD)"
+    if [[ "$before" == "$after" ]]; then
+      ok "$OK already up to date ($(git log -1 --format=%h))"
+    else
+      ok "$OK $(git log -1 --format=%h) ($(git rev-list --count "$before..$after") new commits)"
+      # The pull may have changed this script: run the new version instead.
+      if ! git diff --quiet "$before" "$after" -- scripts/deploy; then
+        echo "The deploy script changed; restarting it."
+        exec scripts/deploy --no-pull
+      fi
+    fi
+  fi
+
+  step "Checking network"
+  if docker network inspect ai-routing >/dev/null 2>&1; then
+    ok
+  else
+    docker network create ai-routing >/dev/null || fail "Could not create the ai-routing network."
+    ok "$OK created ai-routing"
+  fi
+
+  local old_ids=() image id
+  for image in "${IMAGES[@]}"; do
+    id="$(image_id "$image")"
+    [[ -n "$id" ]] && old_ids+=("$id")
+  done
+
+  echo "Building images..."
+  $COMPOSE --profile login build || fail "Build failed. Nothing was deployed; shopee-mcp is still running the old image."
+
+  step "Starting Shopee MCP"
+  $COMPOSE up -d >/dev/null 2>&1 || fail "Could not start shopee-mcp. Check: $COMPOSE logs shopee-mcp"
+  ok
+
+  step "Checking MCP health"
+  local health=""
+  for _ in $(seq 1 45); do
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' shopee-mcp 2>/dev/null || true)"
+    [[ "$health" == healthy ]] && break
+    sleep 2
+  done
+  [[ "$health" == healthy ]] || fail "shopee-mcp did not become healthy (status: ${health:-unknown}). Check: $COMPOSE logs shopee-mcp"
+  ok
+
+  # The deploy succeeded either way; an expired session only needs a new login.
+  step "Checking Shopee session"
+  local session
+  session="$(docker exec shopee-mcp node -e "
+fetch('http://127.0.0.1:' + (process.env.PORT || 8000) + '/mcp', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'check_login_status', arguments: {} } }),
+}).then((r) => r.text()).then((t) => console.log(t.includes('Logged in to') ? 'logged_in' : 'logged_out'), () => console.log('error'));
+" 2>/dev/null || echo error)"
+  if [[ "$session" == logged_in ]]; then
+    ok "$OK logged in"
+  else
+    ok "$WARN not logged in ($session). Run scripts/shopee-login from your laptop."
+  fi
+
+  step "Removing replaced images"
+  # A stopped shopee-login container pins the old login image; the next login
+  # recreates it anyway (--force-recreate), and the profile lives in the volume.
+  $COMPOSE --profile login rm -f shopee-login >/dev/null 2>&1 || true
+  local current=" " removed=0 kept=0
+  for image in "${IMAGES[@]}"; do current+="$(image_id "$image") "; done
+  for id in ${old_ids[@]+"${old_ids[@]}"}; do
+    [[ "$current" == *" $id "* ]] && continue
+    # No --force: an image a container still uses stays.
+    if docker image rm "$id" >/dev/null 2>&1; then
+      removed=$((removed + 1))
+    else
+      kept=$((kept + 1))
+    fi
+  done
+  if [[ $kept -gt 0 ]]; then
+    ok "$OK removed $removed, kept $kept still in use"
+  else
+    ok "$OK removed $removed"
+  fi
+
+  echo
+  echo "Shopee MCP is deployed. Docker disk use:"
+  docker system df
+}
+
+main "$@"

@@ -86,9 +86,21 @@ The viewer is never exposed beyond the server's loopback. The SSH tunnel is the 
 | Logs                  | `docker compose logs -f shopee-mcp`                                                                                                                          |
 | Stop                  | `docker compose stop shopee-mcp`. SIGTERM closes the browser cleanly (about 1s; 30s grace)                                                                   |
 | Restart               | `docker compose restart shopee-mcp`                                                                                                                          |
-| Update code or images | `git pull && docker compose --profile login build && docker compose up -d`                                                                                   |
+| Update code or images | `scripts/deploy` (see [Deploying updates](#deploying-updates))                                                                                               |
 
 `shopee-mcp` uses `restart: unless-stopped`, so it comes back after a crash or reboot. A container you stopped by hand stays stopped, and that includes one stopped by an interrupted login, so run `docker compose up -d` afterwards. `shopee-login` uses `restart: "no"` and never comes back on its own.
+
+### Deploying updates
+
+Run `scripts/deploy` on the server, or `ssh homeserver shopee-mcp/scripts/deploy` from the laptop. It:
+
+1. checks Docker access and refuses to run while `shopee-login` is up;
+2. pulls the current branch, fast-forward only, and restarts itself if the pull changed the script (`--no-pull` deploys the checkout as it is);
+3. builds both images and runs `docker compose up -d`, which recreates `shopee-mcp` only when its image changed;
+4. waits for the health check, then asks the server over MCP whether the Shopee session is still valid. An expired session is a warning, not a failure: run `scripts/shopee-login`;
+5. removes the image versions the build replaced, without `--force`, and prints `docker system df`.
+
+Cleanup touches only this project's two replaced images. It never prunes other projects' images and never touches the `shopee-profile` volume. Docker's build cache is left to its own garbage collection; `docker builder prune` would clear every project's cache.
 
 `/health` is cheap and never launches the browser:
 
