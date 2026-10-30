@@ -57,7 +57,7 @@ async function main() {
     console.log('\n✅ Login detected and saved. You can close this and start the MCP server.\n');
   } else {
     console.log(
-      '\n⚠️  Could not detect a logged-in session (no SPC_U/SPC_EC cookie).\n' +
+      '\n⚠️  Could not detect a logged-in session (no SPC_U cookie).\n' +
         '   If you did log in, the session is still saved to the profile — try the server anyway.\n' +
         '   Otherwise re-run `npm run login`.\n',
     );

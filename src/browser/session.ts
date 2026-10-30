@@ -441,8 +441,10 @@ export async function isLoggedIn(): Promise<boolean> {
   return idle.track(async () => {
     const ctx = await getContext();
     const cookies = await ctx.cookies(BASE_URL);
-    // Shopee sets SPC_U (user id) and SPC_EC (encrypted session) once authenticated.
-    return cookies.some((c) => (c.name === 'SPC_U' || c.name === 'SPC_EC') && c.value.length > 4);
+    // Shopee sets SPC_U (user id) only once sign-in completes, and it persists
+    // across restarts. SPC_EC can appear mid-sign-in and is a session cookie,
+    // so it would report a login the saved profile does not have.
+    return cookies.some((c) => c.name === 'SPC_U' && c.value.length > 4);
   });
 }
 
