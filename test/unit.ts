@@ -14,7 +14,12 @@ import {
   specLines,
   shippingLines,
   sellerLines,
+  toProductDetail,
+  formatProductDetail,
+  productDetailShape,
 } from '../src/tools/product.js';
+import { withErrorHandling } from '../src/utils/errors.js';
+import { z } from 'zod';
 import { buildSearchPath } from '../src/tools/search.js';
 import { starBreakdown, formatReview } from '../src/tools/reviews.js';
 import { formatDuration, formatShop } from '../src/tools/shop.js';
@@ -44,7 +49,15 @@ import { buildVariantRows } from '../src/tools/variants.js';
 import { shopeeCapture, requireLogin, ShopeeAuthRequiredError } from '../src/api/client.js';
 import { cache } from '../src/utils/cache.js';
 import { regionFor } from '../src/browser/session.js';
-import type { SearchItem, ItemBasic, PdpModel, PdpItem, Rating } from '../src/api/types.js';
+import type {
+  SearchItem,
+  ItemBasic,
+  PdpModel,
+  PdpItem,
+  PdpProductPrice,
+  PdpResponse,
+  Rating,
+} from '../src/api/types.js';
 
 let failures = 0;
 const pending: Array<{ name: string; fn: () => void | Promise<void> }> = [];
@@ -422,8 +435,133 @@ test('parseProductUrl: parses "-i.<shopid>.<itemid>" slug form', () => {
   );
 });
 
+test('parseProductUrl: parses the /opaanlp/<shopid>/<itemid> affiliate form', () => {
+  assert.deepEqual(
+    parseProductUrl('https://shopee.co.id/opaanlp/78730497/47060432055?utm_source=an_123'),
+    { shopId: '78730497', itemId: '47060432055' },
+  );
+});
+
 test('parseProductUrl: returns null for an unrelated URL', () => {
   assert.equal(parseProductUrl('https://shopee.co.id/'), null);
+});
+
+// ─── toProductDetail (structured get_product_detail) ────────────────────────
+
+function fakePdp(
+  item: Partial<PdpItem> = {},
+  price: Partial<PdpProductPrice> = {},
+): NonNullable<PdpResponse['data']> {
+  return {
+    item: { item_id: 47060432055, shop_id: 78730497, title: 'Kaos Polos', ...item },
+    product_price: {
+      price: { single_value: 5900000000, range_min: -1, range_max: -1 },
+      ...price,
+    },
+  };
+}
+
+const productDetailSchema = z.object(productDetailShape);
+
+test('toProductDetail: single price has min === max and no discount', () => {
+  const d = toProductDetail(fakePdp(), 'shopee.co.id', 'https://shopee.co.id', 'IDR');
+  assert.deepEqual(d.price, {
+    min: 59000,
+    max: 59000,
+    beforeDiscountMin: null,
+    beforeDiscountMax: null,
+    discountPercent: null,
+  });
+  productDetailSchema.parse(d);
+});
+
+test('toProductDetail: price range with a discount', () => {
+  const d = toProductDetail(
+    fakePdp(
+      {},
+      {
+        price: { single_value: -1, range_min: 5000000000, range_max: 8000000000 },
+        price_before_discount: { single_value: -1, range_min: 10000000000, range_max: 16000000000 },
+      },
+    ),
+    'shopee.co.id',
+    'https://shopee.co.id',
+    'IDR',
+  );
+  assert.deepEqual(d.price, {
+    min: 50000,
+    max: 80000,
+    beforeDiscountMin: 100000,
+    beforeDiscountMax: 160000,
+    discountPercent: 50,
+  });
+});
+
+test('toProductDetail: missing optional fields map to null / empty', () => {
+  const d = toProductDetail(fakePdp(), 'shopee.co.id', 'https://shopee.co.id', 'IDR');
+  assert.equal(d.description, null);
+  assert.equal(d.brand, null);
+  assert.equal(d.condition, 'unknown');
+  assert.deepEqual(d.categories, []);
+  assert.deepEqual(d.rating, { stars: null, count: null });
+  assert.equal(d.soldText, null);
+  assert.equal(d.stock, null);
+  assert.equal(d.shopLocation, null);
+  assert.deepEqual(d.imageUrls, []);
+  assert.equal(d.currency, 'IDR');
+  productDetailSchema.parse(d);
+});
+
+test('toProductDetail: identity fields are strings and the URL is canonical', () => {
+  const d = toProductDetail(fakePdp(), 'shopee.co.id', 'https://shopee.co.id', 'IDR');
+  assert.equal(d.shopId, '78730497');
+  assert.equal(d.itemId, '47060432055');
+  assert.equal(d.url, 'https://shopee.co.id/product/78730497/47060432055');
+  assert.equal(d.domain, 'shopee.co.id');
+});
+
+test('toProductDetail: maps present fields, including the image URL', () => {
+  const data = fakePdp({
+    brand: 'Uniqlo',
+    condition: 1,
+    currency: 'IDR',
+    categories: [{ display_name: 'Pakaian Pria' }, { display_name: 'Kaos' }],
+    item_rating: { rating_star: 4.87, rating_count: [] },
+    stock: 12,
+    shop_location: 'KOTA JAKARTA BARAT',
+    image: 'id-11134207-abc123',
+  });
+  data.product_review = { total_rating_count: 340, sold_count_display: '1,2rb' };
+  const d = toProductDetail(data, 'shopee.co.id', 'https://shopee.co.id', 'IDR');
+  assert.equal(d.brand, 'Uniqlo');
+  assert.equal(d.condition, 'new');
+  assert.deepEqual(d.categories, ['Pakaian Pria', 'Kaos']);
+  assert.deepEqual(d.rating, { stars: 4.87, count: 340 });
+  assert.equal(d.soldText, '1,2rb');
+  assert.equal(d.stock, 12);
+  assert.equal(d.shopLocation, 'KOTA JAKARTA BARAT');
+  assert.deepEqual(d.imageUrls, ['https://down-id.img.susercontent.com/file/id-11134207-abc123']);
+  productDetailSchema.parse(d);
+});
+
+test('toProductDetail: keeps the full description while the text preview is truncated', () => {
+  const description = `Line one\n\n${'x'.repeat(900)}\nLast line`;
+  const data = fakePdp({ description });
+  const d = toProductDetail(data, 'shopee.co.id', 'https://shopee.co.id', 'IDR');
+  assert.equal(d.description, description);
+  const text = formatProductDetail(data, 'IDR', 'https://shopee.co.id');
+  assert.ok(!text.includes('Last line'));
+  assert.ok(text.includes('…'));
+});
+
+test('withErrorHandling: a thrown error becomes an isError result', async () => {
+  const result = await withErrorHandling(async () => {
+    throw new Error('boom');
+  });
+  assert.deepEqual(result, {
+    content: [{ type: 'text', text: '❌ Error: boom' }],
+    isError: true,
+  });
 });
 
 // ─── cache ──────────────────────────────────────────────────────────────────

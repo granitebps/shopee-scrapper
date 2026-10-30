@@ -1,13 +1,16 @@
 import { ShopeeAPIError, ShopeeAuthRequiredError } from '../api/client.js';
 import { setLoggedIn } from '../account-mode.js';
 
+type TextResult = { content: Array<{ type: 'text'; text: string }> };
+
 /**
- * Wraps a tool handler to return a clean MCP error content block
- * instead of throwing and crashing the server.
+ * Wraps a tool handler to return a clean MCP error content block, flagged
+ * `isError` so clients can tell it from a result, instead of throwing and
+ * crashing the server.
  */
-export async function withErrorHandling(
-  fn: () => Promise<{ content: Array<{ type: 'text'; text: string }> }>,
-): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+export async function withErrorHandling<T extends TextResult>(
+  fn: () => Promise<T>,
+): Promise<T | (TextResult & { isError: true })> {
   try {
     return await fn();
   } catch (err) {
@@ -35,7 +38,7 @@ export async function withErrorHandling(
       message = `❌ Unknown error occurred`;
     }
 
-    return { content: [{ type: 'text', text: message }] };
+    return { content: [{ type: 'text', text: message }], isError: true };
   }
 }
 
